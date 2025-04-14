@@ -14,6 +14,6 @@ jobs:
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.PERSONAL_TOKEN }}  # 검증팀의 PAT
-          repository: YOUR_CI_REPO_OWNER/YOUR_CI_REPO_NAME
+          repository: YOUR_CI_REPO_OWNER/YOUR_CI_REPO_NAME  # SWH_Team_3
           event-type: trigger-ci
           client-payload: '{ "repository": "${{ github.repository }}", "commit_sha": "${{ github.sha }}" }'
