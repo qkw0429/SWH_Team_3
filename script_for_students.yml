@@ -1,0 +1,19 @@
+name: Trigger Repository Dispatch
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  trigger-ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository Dispatch
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.PERSONAL_TOKEN }}  # 검증팀의 PAT
+          repository: YOUR_CI_REPO_OWNER/YOUR_CI_REPO_NAME
+          event-type: trigger-ci
+          client-payload: '{ "repository": "${{ github.repository }}", "commit_sha": "${{ github.sha }}" }'
