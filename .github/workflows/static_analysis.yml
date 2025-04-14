@@ -30,7 +30,7 @@ jobs:
       - name: Setup SonarCloud Scanner
         uses: SonarSource/sonarcloud-github-action@master
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}  # 3학년 애들이 우리한테 줘야 하는 것
 
       - name: Download build-wrapper
         run: |
