@@ -27,17 +27,17 @@ jobs:
           sudo make
           sudo cp lib/*.a /usr/lib
 
-      - name: Setup SonarCloud Scanner
+      - name: Setup SonarCloud Scanner  # Docker 없어도 됨
         uses: SonarSource/sonarcloud-github-action@master
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}  # 3학년 애들이 우리한테 줘야 하는 것
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}  # 3학년 애들이 Sonarcube 계정 파서 우리한테 줘야 하는 것
 
       - name: Download build-wrapper
         run: |
           curl -sSLo build-wrapper-linux-x86.zip https://sonarcloud.io/static/cpp/build-wrapper-linux-x86.zip
           unzip build-wrapper-linux-x86.zip
 
-      - name: Build with Coverage (wrapped by SonarCloud build-wrapper)
+      - name: Build with Coverage (wrapped by SonarCloud build-wrapper)  # 안건드려도 됨
         run: |
           mkdir build
           cd build
@@ -54,7 +54,7 @@ jobs:
       - name: Display cppcheck Report
         run: cat cppcheck-report.txt
 
-      - name: Run clang-tidy
+      - name: Run clang-tidy  # 정적분석 도구
         run: |
           mkdir -p clang-tidy-report
           find source-code -name '*.cpp' | xargs -I {} clang-tidy {} -p build > clang-tidy-report/report.txt 2>&1 || true
@@ -66,7 +66,7 @@ jobs:
         run: |
           gcovr -r source-code --exclude tests --sonarqube -o coverage.xml
 
-      - name: Run SonarCloud Analysis
+      - name: Run SonarCloud Analysis  # SonarCloud 실행
         run: |
           sonar-scanner \
             -Dsonar.projectKey=${{ github.event.client_payload.repository }} \
@@ -76,13 +76,13 @@ jobs:
             -Dsonar.coverageReportPaths=coverage.xml \
             -Dsonar.scm.provider=git
 
-      - name: Fetch SonarCloud issues
+      - name: Fetch SonarCloud issues  # SonarCloud에서 발생한 Issue를 Project로 가져옴
         run: |
           curl -s -u ${{ secrets.SONAR_TOKEN }}: \
             "https://sonarcloud.io/api/issues/search?projectKeys=${{ github.event.client_payload.repository }}&resolved=false&pageSize=500" \
             -o sonar-issues.json
 
-      - name: Create GitHub Issue with SonarCloud results
+      - name: Create GitHub Issue with SonarCloud results  # 마크다운 언어로 Issue 표시
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
