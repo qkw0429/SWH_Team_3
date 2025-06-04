@@ -1,5 +1,5 @@
-# SWH_Team_3
-
+# team3
+# SMA8-ASE_2025-1
 CI/CD + static analysis
 
 This is a Repository to provide CI/CD environment (otherwise, CTIP) to SMA team 8.
