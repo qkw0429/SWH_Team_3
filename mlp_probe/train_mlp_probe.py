@@ -118,7 +118,10 @@ def load_split_dataset(feature_path):
     print(f"Loading features from {feature_path}...")
     data = torch.load(feature_path)
 
-    x = data['x']
+    x = data['x'].float()
+    if x.dim() > 2:
+        # [N, ..., num_features] 형태로 남아있는 중간 축(예: patch/time)을 평균 풀링
+        x = x.mean(dim=list(range(1, x.dim() - 1)))
     y = data['y']
 
     return TensorDataset(x, y)
