@@ -218,12 +218,12 @@ if __name__ == "__main__":
 
     print("\n[학습된 head 대조 실험 요약] (★ = head가 실제로 학습된 layer, 이 layer만 method 비교에 안전함)")
     header = "method".ljust(15) + "".join(
-        f"L{layer_num}{'★' if layer_num == HEAD_TRAINED_LAYER else ' '}".rjust(10)
+        f"L{layer_num}{'★' if layer_num == HEAD_TRAINED_LAYER else ' '}".rjust(12)
         for layer_num in LAYER_NUMS
     )
     print(header)
     for method_name, per_layer in results.items():
         row = method_name.ljust(15) + "".join(
-            f"{per_layer[layer_num]['balanced_accuracy']:.2f}".rjust(10) for layer_num in LAYER_NUMS
+            f"{per_layer[layer_num]['balanced_accuracy']:.4f}".rjust(12) for layer_num in LAYER_NUMS
         )
         print(row)
