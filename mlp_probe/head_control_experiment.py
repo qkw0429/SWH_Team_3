@@ -1,7 +1,7 @@
 """
 대조(control) 실험: layer-wise MLP probe 대신, main 실험에서 실제로 학습된
-linear_probe1 / linear_probe2 헤드를 그대로 불러와 SUB1 fold의 layer 8 feature에
-적용했을 때도 main 실험과 같은 순위(예: dynamic pearl 우세)가 재현되는지 확인한다.
+linear_probe1 / linear_probe2 헤드를 그대로 불러와 SUB1 fold의 feature에 적용했을 때도
+main 실험과 같은 순위(예: dynamic pearl 우세)가 재현되는지 확인한다.
 
 이 head는 encoder(및 prompt/adapter)와 함께 method별로 따로 학습된 파라미터이므로,
 반드시 평가하려는 method 자신의 checkpoint에서 불러와야 한다. 다른 method의 head를
@@ -16,6 +16,12 @@ linear_probe1 / linear_probe2 헤드를 그대로 불러와 SUB1 fold의 layer 8
 
 LinearWithConstraint은 학습 중 weight norm을 clamp하는 제약이지만, 이미 수렴된
 가중치를 그대로 불러와 추론만 하는 상황에서는 plain nn.Linear와 동일하게 동작한다.
+
+이 head는 layer 8의 summary_token 분포에 맞춰 학습되었다. 다른 layer에도 적용해
+전체 layer를 훑어볼 수 있지만, layer 8이 아닌 결과는 "그 layer의 feature 품질"과
+"head의 분포 불일치로 인한 성능 저하"가 뒤섞여 있어 method 간 feature 품질 비교의
+근거로 쓰기 어렵다 — layer 8 결과만 원래 목적(fresh MLP probe vs 학습된 head 비교)에
+안전하게 쓸 수 있고, 나머지는 참고용 진단 정보로 취급해야 한다.
 """
 import os
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "2")
@@ -88,27 +94,32 @@ def head_forward(x, linear_probe1, linear_probe2):
 
 def run_head_control_experiment(
     method_name,
-    ckpt_path,
+    linear_probe1,
+    linear_probe2,
     dataset_path,
     model,
     layer_num,
+    device,
     output_type="multiclass",
     metrics=None,
     batch_size=64,
 ):
     """
-    method 자신의 학습된 head를 SUB1 fold의 지정 layer feature(기본적으로 head가 실제
-    학습된 마지막 layer)에 적용해 test set 성능을 계산한다.
+    method 자신의 학습된 head(linear_probe1/2)를 SUB1 fold의 지정 layer feature에
+    적용해 test set 성능을 계산한다.
+
+    주의: 이 head는 layer 8의 summary_token 분포에 맞춰 학습되었다. layer 8이 아닌
+    다른 layer에 적용한 결과는 "그 layer의 feature 품질"과 "head의 분포 불일치로 인한
+    성능 저하"가 뒤섞여 있어, method 간 feature 품질을 비교하는 근거로 쓰기에는
+    주의가 필요하다. layer 8 결과만 원래 목적(fresh MLP probe vs 학습된 head 비교)에
+    안전하게 쓸 수 있고, 나머지 layer는 참고용 진단 정보로 취급한다.
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n>>> [{method_name} / Layer {layer_num}] 학습된 head 대조 실험 시작 (Device: {device})")
 
     layer_dir = f"{dataset_path}/{model}_model/SUB1_Model/layer_{layer_num}"
     test_path = os.path.join(layer_dir, TEST_FILENAME)
     x_test, y_test = load_summary_token_features(test_path)
     print(f"Test: {len(y_test)} samples, feature shape = {tuple(x_test.shape)}")
-
-    linear_probe1, linear_probe2 = load_probe_heads(ckpt_path, device)
 
     test_logits_list = []
     test_targets_list = []
@@ -137,7 +148,8 @@ if __name__ == "__main__":
     DATASET_PATH = "/data/dataset/BCIC-2A/layer_wise/entire"
     OUTPUT_TYPE = "multiclass"
     METRICS = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
-    LAYER_NUM = 8  # linear_probe1/2가 실제로 학습된 layer만 사용 (다른 layer는 분포가 맞지 않아 무의미함)
+    LAYER_NUMS = list(range(1, 9))
+    HEAD_TRAINED_LAYER = 8  # linear_probe1/2가 실제로 학습된 layer (이 layer 결과만 method 비교에 안전)
 
     # method 이름 -> (dataset_path의 {model}_model 폴더명, 학습된 checkpoint 경로)
     METHOD_CONFIGS = {
@@ -159,19 +171,33 @@ if __name__ == "__main__":
         ),
     }
 
-    results = {}
-    for method_name, (model_dir, ckpt_path) in METHOD_CONFIGS.items():
-        results[method_name] = run_head_control_experiment(
-            method_name=method_name,
-            ckpt_path=ckpt_path,
-            dataset_path=DATASET_PATH,
-            model=model_dir,
-            layer_num=LAYER_NUM,
-            output_type=OUTPUT_TYPE,
-            metrics=METRICS,
-        )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print("\n[학습된 head 대조 실험 요약]")
-    for method_name, m in results.items():
-        print(f"{method_name:15s} | B_Acc: {m['balanced_accuracy']:.4f} | "
-            f"Kappa: {m['cohen_kappa']:.4f} | W_F1: {m['f1_weighted']:.4f}")
+    # method별 head는 한 번만 불러오고, layer마다 재사용한다.
+    results = {method_name: {} for method_name in METHOD_CONFIGS}
+    for method_name, (model_dir, ckpt_path) in METHOD_CONFIGS.items():
+        linear_probe1, linear_probe2 = load_probe_heads(ckpt_path, device)
+        for layer_num in LAYER_NUMS:
+            results[method_name][layer_num] = run_head_control_experiment(
+                method_name=method_name,
+                linear_probe1=linear_probe1,
+                linear_probe2=linear_probe2,
+                dataset_path=DATASET_PATH,
+                model=model_dir,
+                layer_num=layer_num,
+                device=device,
+                output_type=OUTPUT_TYPE,
+                metrics=METRICS,
+            )
+
+    print("\n[학습된 head 대조 실험 요약] (★ = head가 실제로 학습된 layer, 이 layer만 method 비교에 안전함)")
+    header = "method".ljust(15) + "".join(
+        f"L{layer_num}{'★' if layer_num == HEAD_TRAINED_LAYER else ' '}".rjust(10)
+        for layer_num in LAYER_NUMS
+    )
+    print(header)
+    for method_name, per_layer in results.items():
+        row = method_name.ljust(15) + "".join(
+            f"{per_layer[layer_num]['balanced_accuracy']:.2f}".rjust(10) for layer_num in LAYER_NUMS
+        )
+        print(row)
