@@ -8,7 +8,8 @@ main 실험과 같은 순위(예: dynamic pearl 우세)가 재현되는지 확�
 가져다 쓰면 입력 분포가 맞지 않아 의미 있는 비교가 되지 않는다.
 
 원래 학습된 forward 경로(LitEEGPTCausal, 주석 처리되지 않은 버전)를 그대로 재현한다:
-    z = target_encoder(x, chan_ids)              # (B, N_time_patch, EMBED_NUM, D)
+    z = target_encoder(x, chan_ids)               # (B, N_time_patch, EMBED_NUM, D)
+    z = norm(z)                                   # target_encoder.norm (LayerNorm, method별 학습됨)
     h = z.flatten(2)                              # (B, N_time_patch, EMBED_NUM*D)
     h = linear_probe1(h)                          # (B, N_time_patch, 16)
     h = h.flatten(1)                              # (B, N_time_patch*16)
@@ -66,6 +67,27 @@ def load_probe_heads(ckpt_path, device):
     return linear_probe1.to(device).eval(), linear_probe2.to(device).eval()
 
 
+def load_final_norm(ckpt_path, device):
+    """
+    checkpoint에서 target_encoder의 최종 LayerNorm(self.norm) 가중치를 불러온다.
+    forward()에서 summary_token을 자른 뒤 linear_probe1에 넣기 전에 이 norm을
+    한 번 통과시키므로, 이것도 method별로 따로 학습된 파라미터라서 반드시
+    평가하려는 method 자신의 checkpoint에서 불러와야 한다.
+    """
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
+
+    w_key = find_key(state_dict, "norm.weight")
+    b_key = find_key(state_dict, "norm.bias")
+    w, b = state_dict[w_key], state_dict[b_key]
+
+    norm = nn.LayerNorm(w.shape[0], eps=1e-6)
+    norm.weight.data.copy_(w)
+    norm.bias.data.copy_(b)
+
+    return norm.to(device).eval()
+
+
 def load_summary_token_features(feature_path):
     """
     raw feature(.pt)에서 summary_token 부분만 잘라 (N, N_time_patch, EMBED_NUM, D) 형태로
@@ -82,8 +104,9 @@ def load_summary_token_features(feature_path):
     return x, y
 
 
-def head_forward(x, linear_probe1, linear_probe2):
+def head_forward(x, norm, linear_probe1, linear_probe2):
     """x: (B, N_time_patch, EMBED_NUM, D) -> logits: (B, num_outputs)"""
+    x = norm(x)  # forward()에서 summary_token을 자른 뒤 linear_probe1 전에 통과시키는 LayerNorm
     B, N, E, D = x.shape
     h = x.reshape(B, N, E * D)
     h = linear_probe1(h)
@@ -94,6 +117,7 @@ def head_forward(x, linear_probe1, linear_probe2):
 
 def run_head_control_experiment(
     method_name,
+    norm,
     linear_probe1,
     linear_probe2,
     dataset_path,
@@ -127,7 +151,7 @@ def run_head_control_experiment(
         for start in range(0, len(y_test), batch_size):
             batch_x = x_test[start:start + batch_size].to(device)
             batch_y = y_test[start:start + batch_size].to(device)
-            logits = head_forward(batch_x, linear_probe1, linear_probe2)
+            logits = head_forward(batch_x, norm, linear_probe1, linear_probe2)
             test_logits_list.append(logits)
             test_targets_list.append(batch_y)
 
@@ -173,13 +197,15 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # method별 head는 한 번만 불러오고, layer마다 재사용한다.
+    # method별 norm/head는 한 번만 불러오고, layer마다 재사용한다.
     results = {method_name: {} for method_name in METHOD_CONFIGS}
     for method_name, (model_dir, ckpt_path) in METHOD_CONFIGS.items():
+        norm = load_final_norm(ckpt_path, device)
         linear_probe1, linear_probe2 = load_probe_heads(ckpt_path, device)
         for layer_num in LAYER_NUMS:
             results[method_name][layer_num] = run_head_control_experiment(
                 method_name=method_name,
+                norm=norm,
                 linear_probe1=linear_probe1,
                 linear_probe2=linear_probe2,
                 dataset_path=DATASET_PATH,
