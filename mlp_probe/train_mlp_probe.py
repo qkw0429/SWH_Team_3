@@ -16,6 +16,11 @@ TRAIN_FILENAME = "train_features_labels_subjectids.pt"
 VALID_FILENAME = "valid_features_labels_subjectids.pt"
 TEST_FILENAME = "test_features_labels_subjectids.pt"
 
+# summary_token 개수 (모든 model 변형에서 embed_num=4로 동일하게 구성됨).
+# 저장된 x의 토큰 축(뒤에서 두 번째 축)은 "채널 패치 + summary_token"으로 구성되어 있는데,
+# 실제 classifier(linear_probe1/2)는 summary_token만 사용하므로 여기서도 마지막 EMBED_NUM개만 사용한다.
+EMBED_NUM = 4
+
 
 class SimpleMLP(nn.Module):
     def __init__(
@@ -109,7 +114,13 @@ def calculate_metrics(all_logits, all_targets, output_type, metrics):
 
 def load_split_dataset(feature_path):
     """
-    미리 train/valid/test로 나뉘어 저장된 피처(.pt)를 그대로 불러와 TensorDataset으로 반환합니다.
+    미리 train/valid/test로 나뉘어 저장된 피처(.pt)를 불러와 TensorDataset으로 반환합니다.
+
+    저장된 x는 [N, N_time_patch, mC+EMBED_NUM, num_features] 형태로, 뒤에서 두 번째 축이
+    "채널 패치 + summary_token" 토큰 축입니다. 실제 classifier(linear_probe1/2)는 이 중
+    summary_token(마지막 EMBED_NUM개)만 사용하고 나머지(N_time_patch, EMBED_NUM)는 flatten해
+    그대로 입력으로 쓰므로, 여기서도 동일하게 summary_token만 남긴 뒤 flatten한다.
+    (이미 summary_token만 저장된 경우에도 슬라이싱은 그대로 전체 축을 선택하므로 안전하다.)
     """
     if not os.path.exists(feature_path):
         print(f"Error: {feature_path} 경로에 파일이 존재하지 않습니다. 스킵합니다.")
@@ -120,8 +131,8 @@ def load_split_dataset(feature_path):
 
     x = data['x'].float()
     if x.dim() > 2:
-        # [N, ..., num_features] 형태로 남아있는 중간 축(예: patch/time)을 평균 풀링
-        x = x.mean(dim=list(range(1, x.dim() - 1)))
+        x = x[..., -EMBED_NUM:, :]
+        x = x.flatten(start_dim=1)
     y = data['y']
 
     return TensorDataset(x, y)
@@ -163,7 +174,9 @@ def run_layer_experiment(
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     # 2.3 모델 및 옵티마이저 선언
-    num_features = 512
+    # flatten된 feature 차원은 layer_num마다 N_time_patch가 달라질 수 있으므로 동적으로 계산
+    num_features = train_dataset.tensors[0].shape[1]
+    print(f"[Layer {layer_num}] num_features (flattened) = {num_features}")
     probe = SimpleMLP(
         num_features=num_features,
         hidden_layer_sizes=[], # Linear Probing을 위해 빈 리스트 전달
