@@ -22,40 +22,31 @@ TEST_FILENAME = "test_features_labels_subjectids.pt"
 EMBED_NUM = 4
 
 
-class SimpleMLP(nn.Module):
-    def __init__(
-        self,
-        num_features,       # 입력 feature의 차원 (Transformer 레이어의 hidden_size)
-        hidden_layer_sizes, # 은닉층 차원 리스트 (Linear Probing 시에는 [] 빈 리스트 사용)
-        num_outputs,        # 최종 출력 차원 (클래스 개수 또는 타겟 개수)
-        dropout_input=True,
-        dropout_p=0.5,
-    ):
+class StructuredProbe(nn.Module):
+    """
+    main 실험에서 실제로 학습된 linear_probe1/2와 동일한 factorized 구조를 갖되,
+    가중치는 불러오지 않고 매번 무작위 초기화해서 새로 학습하는 "공정한" probe.
+
+    (N_time_patch, EMBED_NUM, D)를 통째로 flatten해 거대한 단일 Linear 하나로 매핑하는
+    대신, time-patch마다 파라미터를 공유하는 probe1을 먼저 적용한 뒤 그 결과를 모아
+    probe2로 최종 클래스 수만큼 줄인다. 이 구조는 실제 head와 동일한 파라미터 공유
+    방식이라, 작은 데이터에서도 단일 거대 Linear보다 학습이 잘 될 가능성이 높다.
+    원본 forward에서도 probe1/probe2 사이에 활성화 함수가 없으므로 여기서도 넣지 않는다.
+    """
+    def __init__(self, embed_num, embed_dim, num_time_patch, hidden_dim, num_outputs, dropout_p=0.5):
         super().__init__()
-        d = num_features
-        self.num_layers = len(hidden_layer_sizes)
-
-        # 은닉층 레이어 동적 생성
-        for i, ld in enumerate(hidden_layer_sizes):
-            setattr(self, f"hidden_{i}", nn.Linear(d, ld))
-            d = ld
-
-        # 최종 출력 레이어
-        self.output = nn.Linear(d, num_outputs)
+        self.probe1 = nn.Linear(embed_num * embed_dim, hidden_dim)
+        self.probe2 = nn.Linear(num_time_patch * hidden_dim, num_outputs)
         self.dropout = nn.Dropout(p=dropout_p)
 
     def forward(self, x):
-        # 입력 드롭아웃
-        x = self.dropout(x)
-
-        # 은닉층 통과 (Linear Probing 시에는 이 루프를 타지 않음)
-        for i in range(self.num_layers):
-            x = getattr(self, f"hidden_{i}")(x)
-            x = F.relu(x)
-            x = self.dropout(x)
-
-        # 최종 출력
-        return self.output(x)
+        # x: (B, N_time_patch, EMBED_NUM, D)
+        B, N, E, D = x.shape
+        h = self.dropout(x.reshape(B, N, E * D))
+        h = self.probe1(h)      # (B, N_time_patch, hidden_dim)
+        h = h.reshape(B, -1)    # (B, N_time_patch * hidden_dim)
+        h = self.probe2(h)      # (B, num_outputs)
+        return h
 
 
 def compute_loss(logits, y, output_type):
@@ -118,8 +109,9 @@ def load_split_dataset(feature_path):
 
     저장된 x는 [N, N_time_patch, mC+EMBED_NUM, num_features] 형태로, 뒤에서 두 번째 축이
     "채널 패치 + summary_token" 토큰 축입니다. 실제 classifier(linear_probe1/2)는 이 중
-    summary_token(마지막 EMBED_NUM개)만 사용하고 나머지(N_time_patch, EMBED_NUM)는 flatten해
-    그대로 입력으로 쓰므로, 여기서도 동일하게 summary_token만 남긴 뒤 flatten한다.
+    summary_token(마지막 EMBED_NUM개)만 사용하므로 여기서도 동일하게 마지막 EMBED_NUM개만
+    남깁니다. StructuredProbe가 (N_time_patch, EMBED_NUM, D) 구조를 그대로 필요로 하므로
+    여기서는 flatten하지 않고 구조를 유지한 채 반환합니다.
     (이미 summary_token만 저장된 경우에도 슬라이싱은 그대로 전체 축을 선택하므로 안전하다.)
     """
     if not os.path.exists(feature_path):
@@ -132,7 +124,6 @@ def load_split_dataset(feature_path):
     x = data['x'].float()
     if x.dim() > 2:
         x = x[..., -EMBED_NUM:, :]
-        x = x.flatten(start_dim=1)
     y = data['y']
 
     return TensorDataset(x, y)
@@ -153,7 +144,9 @@ def run_layer_experiment(
     batch_size=64,
     lr=1e-3,
     weight_decay=1e-4,
-    patience=10  # [사수 추가] Early stopping을 위한 patience 값 (기본 10 에폭)
+    patience=10,  # [사수 추가] Early stopping을 위한 patience 값 (기본 10 에폭)
+    hidden_dim=16,  # StructuredProbe의 probe1 출력 차원 (원본 linear_probe1과 동일하게 기본 16)
+    dropout_p=0.5,  # 원본 head 학습 때와 동일하게 기본 0.5
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n>>> [Layer {layer_num}] 실험 시작 (Device: {device})")
@@ -174,15 +167,17 @@ def run_layer_experiment(
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     # 2.3 모델 및 옵티마이저 선언
-    # flatten된 feature 차원은 layer_num마다 N_time_patch가 달라질 수 있으므로 동적으로 계산
-    num_features = train_dataset.tensors[0].shape[1]
-    print(f"[Layer {layer_num}] num_features (flattened) = {num_features}")
-    probe = SimpleMLP(
-        num_features=num_features,
-        hidden_layer_sizes=[], # Linear Probing을 위해 빈 리스트 전달
+    # (N_time_patch, EMBED_NUM, D)는 layer_num/dataset마다 달라질 수 있으므로 동적으로 계산
+    _, num_time_patch, embed_num, embed_dim = train_dataset.tensors[0].shape
+    print(f"[Layer {layer_num}] feature shape = (N_time_patch={num_time_patch}, "
+        f"EMBED_NUM={embed_num}, D={embed_dim})")
+    probe = StructuredProbe(
+        embed_num=embed_num,
+        embed_dim=embed_dim,
+        num_time_patch=num_time_patch,
+        hidden_dim=hidden_dim,
         num_outputs=num_outputs,
-        dropout_input=True,
-        dropout_p=0.0
+        dropout_p=dropout_p,
     ).to(device)
 
     optimizer = torch.optim.Adam(probe.parameters(), lr=lr, weight_decay=weight_decay)
