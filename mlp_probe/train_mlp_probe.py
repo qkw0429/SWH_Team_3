@@ -59,7 +59,9 @@ def compute_loss(logits, y, output_type):
     if output_type == "multiclass":
         loss = F.cross_entropy(logits, y, reduction="mean")
     elif output_type == "multilabel":
-        loss = F.binary_cross_entropy_with_logits(logits, y.float(), reduction="mean")
+        # num_outputs=1인 이진 분류의 경우 logits는 (B, 1)인데 y는 (B,)로 들어오므로
+        # shape을 logits에 맞춰준다 (multilabel 다중 출력인 경우는 원래도 (B, num_outputs)라 no-op).
+        loss = F.binary_cross_entropy_with_logits(logits, y.float().view_as(logits), reduction="mean")
     elif output_type == "regression":
         loss = F.mse_loss(logits, y, reduction="mean")
     else:
@@ -91,6 +93,9 @@ def calculate_metrics(all_logits, all_targets, output_type, metrics):
     elif output_type == "multilabel":
         # 바이너리/멀티레이블은 시그모이드를 통과한 확률값을 전달
         y_pred = torch.sigmoid(all_logits).cpu().numpy()
+        if y_pred.ndim > 1 and y_pred.shape[-1] == 1:
+            # num_outputs=1인 이진 분류의 경우 (N, 1) -> (N,)으로 맞춰준다
+            y_pred = y_pred.squeeze(-1)
 
         metrics = binary_metrics_fn(
             y_true,
